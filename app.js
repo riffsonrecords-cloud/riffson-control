@@ -1,0 +1,38 @@
+'use strict';
+const KEY='riffson-control-v1', BACKUP_KEY='riffson-control-last-backup';
+const $=id=>document.getElementById(id);
+const pad=n=>String(n).padStart(2,'0');
+const duration=ms=>{let s=Math.max(0,Math.floor(ms/1000));return `${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`};
+const fmt=ms=>new Intl.DateTimeFormat('es-ES',{timeZone:'Europe/Madrid',dateStyle:'short',timeStyle:'medium'}).format(new Date(ms));
+const parts=ms=>Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms)).filter(p=>p.type!=='literal').map(p=>[p.type,Number(p.value)]));
+const dateOf=ms=>{let p=parts(ms),d=new Date(Date.UTC(p.year,p.month-1,p.day));if(p.hour<4)d.setUTCDate(d.getUTCDate()-1);return d.toISOString().slice(0,10)};
+// At 04:00–07:59 attribute to an explicit review bucket, never silently to the previous day.
+const bucket=ms=>{let p=parts(ms);return p.hour>=4&&p.hour<8?dateOf(ms)+' (revisar 04–08)':dateOf(ms)};
+const nextBoundary=ms=>{const b=bucket(ms);let low=ms,high=ms+3600000;while(bucket(high)===b){low=high;high+=3600000}while(low+1<high){const mid=low+Math.floor((high-low)/2);if(bucket(mid)===b)low=mid;else high=mid}return high};
+function blank(){return {schema:1,session:null,history:[]}}
+function valid(d){return d&&d.schema===1&&Array.isArray(d.history)&&(d.session===null||d.session&&Array.isArray(d.session.segments))&&d.history.every(x=>typeof x.id==='string'&&Array.isArray(x.segments))}
+let data,readOnly=false;try{data=JSON.parse(localStorage.getItem(KEY)||'null');if(!valid(data))throw Error('Datos incompatibles')}catch(e){data=blank();if(localStorage.getItem(KEY)){readOnly=true;alert('Hay datos locales incompatibles. Se ha bloqueado la escritura para evitar sobrescribirlos. Exporta los datos del navegador antes de continuar.')}}
+function save(){if(readOnly)throw Error('Escritura bloqueada para proteger registros anteriores');try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){alert('Error al guardar. No continúes registrando trabajo sin liberar espacio y crear una copia.');throw e}}
+function newId(){return typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random().toString(36).slice(2)}
+function spanList(s,now=Date.now()){return s.segments.map(g=>({...g,end:g.end??now})).filter(g=>g.end>=g.start)}
+function total(s,now=Date.now()){return spanList(s,now).reduce((a,g)=>a+g.end-g.start,0)}
+function active(){return data.session&&data.session.segments.some(g=>g.end===null)}
+function buttons(){let s=data.session; $('start').disabled=readOnly||!!s;$('pause').disabled=readOnly||!active();$('resume').disabled=readOnly||!s||!!active();$('finish').disabled=readOnly||!s}
+function renderClock(){let s=data.session,now=Date.now();$('clock').textContent=duration(s?total(s,now):0);$('status').textContent=!s?'Sin jornada activa':active()?'● Cronómetro en marcha':'Ⅱ Jornada en pausa';$('day').textContent=s?'Inicio: '+fmt(s.startedAt):'Jornada no iniciada';$('segments').textContent=s?`${s.segments.length} tramo(s)`:'0 tramos';buttons()}
+function transition(f){try{if(readOnly)throw Error('Datos bloqueados');f();save();renderAll()}catch(e){console.error(e);alert('No se pudo guardar el cambio. Revisa el almacenamiento del dispositivo.')}}
+$('start').onclick=()=>transition(()=>{if(data.session)return;let t=Date.now();data.session={id:newId(),startedAt:t,finishedAt:null,segments:[{start:t,end:null}]}});
+$('pause').onclick=()=>transition(()=>{if(!active())return;data.session.segments.at(-1).end=Date.now()});
+$('resume').onclick=()=>transition(()=>{if(!data.session||active())return;data.session.segments.push({start:Date.now(),end:null})});
+$('finish').onclick=()=>{if(!data.session)return;if(!confirm('¿Finalizar la jornada? Se conservarán todos los tramos.'))return;transition(()=>{let now=Date.now();if(active())data.session.segments.at(-1).end=now;data.session.finishedAt=now;data.history.unshift(data.session);data.session=null})};
+function grouped(){let out={};for(let s of [...data.history,...(data.session?[data.session]:[])])for(let seg of spanList(s)){let pos=seg.start;while(pos<seg.end){let key=bucket(pos),end=Math.min(seg.end,nextBoundary(pos));out[key]=(out[key]||0)+(end-pos);pos=end}}return out}
+function renderHistory(){const g=grouped(),keys=Object.keys(g).sort().reverse();$('totals').textContent=`${data.history.length} jornada(s) cerrada(s) · ${duration(Object.values(g).reduce((a,b)=>a+b,0))} en total (incluye la jornada activa).`;$('history').replaceChildren();if(!keys.length){$('history').textContent='Todavía no hay horas registradas.';return}for(let k of keys){let node=document.createElement('div');node.className='entry';let a=document.createElement('strong'),b=document.createElement('span');a.textContent=k;b.textContent=duration(g[k]);node.append(a,b);$('history').append(node)}}
+function renderAll(){renderClock();renderHistory();$('backupInfo').textContent='Última copia descargada desde esta app: '+(localStorage.getItem(BACKUP_KEY)||'ninguna registrada')}
+function download(name,content,type){let url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+$('exportJSON').onclick=()=>{download('riffson-control-backup-'+new Date().toISOString().slice(0,10)+'.json',JSON.stringify({...data,exportedAt:new Date().toISOString()},null,2),'application/json');localStorage.setItem(BACKUP_KEY,fmt(Date.now()));renderAll()};
+const csv=q=>'"'+String(q).replaceAll('"','""')+'"';
+$('exportCSV').onclick=()=>{let rows=[['id','inicio_Barcelona','fin_Barcelona','segundos','estado']];for(let s of [...data.history,...(data.session?[data.session]:[])])for(let seg of s.segments)rows.push([s.id,fmt(seg.start),seg.end===null?'EN CURSO':fmt(seg.end),Math.floor(((seg.end??Date.now())-seg.start)/1000),seg.end===null?'activo':'cerrado']);download('riffson-control-tramos.csv','\ufeff'+rows.map(r=>r.map(csv).join(';')).join('\r\n'),'text/csv;charset=utf-8')};
+$('importJSON').onchange=async e=>{let file=e.target.files[0];if(!file)return;try{let raw=JSON.parse(await file.text());if(!valid(raw))throw Error('Formato incorrecto');for(let s of [...raw.history,...(raw.session?[raw.session]:[])]){if(!Number.isFinite(s.startedAt)||!Array.isArray(s.segments)||s.segments.some(g=>!Number.isFinite(g.start)||(g.end!==null&&(!Number.isFinite(g.end)||g.end<g.start))))throw Error('Tramos inválidos')}if(readOnly)throw Error('La escritura está bloqueada para proteger los datos originales');if(!confirm('ATENCIÓN: esta operación REEMPLAZARÁ todos los datos actuales. Descarga antes una copia JSON. ¿Continuar?'))return;data={schema:1,session:raw.session,history:raw.history};save();renderAll();alert('Copia restaurada correctamente')}catch(err){alert('No se restauró el archivo: '+err.message)}finally{e.target.value=''}};
+$('nex').onclick=()=>window.open('https://chatgpt.com/','_blank','noopener');
+for(let [tab,view] of [['tabClock','viewClock'],['tabHistory','viewHistory'],['tabBackup','viewBackup']])$(tab).onclick=()=>{for(let id of ['viewClock','viewHistory','viewBackup'])$(id).hidden=id!==view;for(let id of ['tabClock','tabHistory','tabBackup'])$(id).classList.toggle('active',id===tab);renderAll()};
+if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+renderAll();setInterval(()=>{if(!document.hidden)renderClock()},1000);document.addEventListener('visibilitychange',renderAll);
